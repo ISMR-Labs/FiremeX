@@ -458,11 +458,15 @@ Next:
 
 ## License
 
-**Not yet chosen** — see [#1](https://github.com/ISMR-Labs/FiremeX/issues/1).
+[Apache-2.0](LICENSE).
 
-The constraint to design around: **Ultralytics YOLO is AGPL-3.0** unless you hold an Ultralytics
-commercial licence. FiremeX keeps the ONNX Runtime path free of that dependency precisely so this stays a
-choice rather than a trap — the `ultralytics` extra is opt-in and used for development and fine-tuning,
-while production inference can run pure ONNX.
+One dependency note worth knowing: **Ultralytics YOLO is AGPL-3.0** unless you hold an Ultralytics
+commercial licence. FiremeX keeps that off the production install deliberately —
+[`firemex/detect/onnx_backend.py`](firemex/detect/onnx_backend.py) implements letterboxing, decoding and
+NMS directly, so the ONNX runtime path has no Ultralytics dependency, and the Docker image installs
+`.[video,onnx]` with no torch. The `ultralytics` extra is opt-in and used for development, evaluation and
+fine-tuning.
 
-Until a `LICENSE` file lands, default copyright applies and nobody else may use this code.
+Model weights carry their own licences. The default checkpoint
+([YOLOv26-S](https://huggingface.co/SalahALHaismawi/yolov26-fire-detection)) is MIT; check before
+substituting another.
