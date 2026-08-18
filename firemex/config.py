@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:8000"
     validate_twilio_signature: bool = True
 
+    #: Bearer token allowing Prometheus to scrape /metrics without a login. When
+    #: empty, /metrics requires a dashboard session. Metrics carry camera names and
+    #: incident counts, so the endpoint is not left open either way.
+    metrics_token: str = ""
+    session_ttl_hours: int = Field(default=12, ge=1, le=720)
+
     database_url: str = "sqlite+pysqlite:///./data/firemex.db"
     redis_url: str | None = None
 
@@ -141,6 +147,11 @@ class CameraConfig(BaseModel):
     rtsp: str
     location: str = ""
     enabled: bool = True
+    #: Camera credentials, kept out of the URL so they can be entered in their own
+    #: form field, stored in their own key, and redacted independently on the way
+    #: back out of the API. Credentials embedded directly in ``rtsp`` still work.
+    username: str | None = None
+    password: str | None = None
     #: Inference frames per second. 2-5 is plenty; fire evolves over seconds.
     sample_fps: float = Field(default=3.0, gt=0, le=30)
     thresholds: Thresholds = Thresholds()
@@ -168,7 +179,33 @@ class CameraConfig(BaseModel):
 
     @property
     def detect_url(self) -> str:
-        return self.substream_rtsp or self.rtsp
+        """URL used for detection, with credentials applied."""
+        from .auth import build_rtsp_url
+
+        return build_rtsp_url(self.substream_rtsp or self.rtsp, self.username, self.password)
+
+    @property
+    def record_url(self) -> str:
+        """Full-resolution URL, used when recording an incident clip."""
+        from .auth import build_rtsp_url
+
+        return build_rtsp_url(self.rtsp, self.username, self.password)
+
+    def public_dict(self) -> dict:
+        """API-safe shape. Never contains the camera password.
+
+        Even an authenticated admin must not be handed it back: it would end up in
+        browser history, screenshots and support tickets.
+        """
+        from .auth import redact_url
+
+        payload = self.model_dump(mode="json")
+        payload.pop("password", None)
+        payload["has_password"] = bool(self.password)
+        payload["rtsp"] = redact_url(self.rtsp)
+        if self.substream_rtsp:
+            payload["substream_rtsp"] = redact_url(self.substream_rtsp)
+        return payload
 
     def is_night(self, at: dt.time) -> bool:
         if self.night_start <= self.night_end:
@@ -217,12 +254,34 @@ class AlertingConfig(BaseModel):
     sms_template: str = "FiremeX: {labels} detected on {camera} ({location}) at {site}. {link}"
 
 
+class DetectionConfig(BaseModel):
+    """Model and pipeline settings editable from the Settings page.
+
+    Every field is optional: unset means "use the environment value". That keeps a
+    container's env vars authoritative until somebody deliberately overrides them
+    in the UI, instead of a fresh config.yaml silently resetting the model.
+    """
+
+    backend: DetectorBackend | None = None
+    model_path: str | None = None
+    device: str | None = None
+    batch_size: int | None = Field(default=None, ge=1, le=64)
+    batch_timeout_ms: int | None = Field(default=None, ge=1, le=1000)
+    image_size: int | None = Field(default=None, ge=128, le=1920)
+    #: Detector-level floor. Deliberately below the per-camera operating
+    #: thresholds so the incident engine applies the real cut.
+    confidence_floor: float | None = Field(default=None, ge=0.0, le=1.0)
+    #: Master alerting switch. None means defer to FIREMEX_SHADOW_MODE.
+    shadow_mode: bool | None = None
+
+
 class SiteConfig(BaseModel):
     name: str = "Unnamed site"
     timezone: str = "UTC"
     cameras: list[CameraConfig] = Field(default_factory=list)
     contacts: list[ContactConfig] = Field(default_factory=list)
     alerting: AlertingConfig = AlertingConfig()
+    detection: DetectionConfig = DetectionConfig()
 
     @model_validator(mode="after")
     def _check_references(self) -> SiteConfig:
@@ -270,6 +329,7 @@ def load_site_config(path: str | Path) -> SiteConfig:
         cameras=raw.get("cameras", []) or [],
         contacts=raw.get("contacts", []) or [],
         alerting=raw.get("alerting", {}) or {},
+        detection=raw.get("detection", {}) or {},
     )
 
 
@@ -280,5 +340,6 @@ def dump_site_config(config: SiteConfig, path: str | Path) -> None:
         "cameras": [c.model_dump(mode="json", exclude_defaults=True) for c in config.cameras],
         "contacts": [c.model_dump(mode="json", exclude_defaults=True) for c in config.contacts],
         "alerting": config.alerting.model_dump(mode="json", exclude_defaults=True),
+        "detection": config.detection.model_dump(mode="json", exclude_none=True),
     }
     Path(path).write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))

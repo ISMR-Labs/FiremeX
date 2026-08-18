@@ -45,7 +45,7 @@ firemex = "firemex.cli:main"
 include = ["firemex*"]
 
 [tool.setuptools.package-data]
-firemex = ["web/*"]
+firemex = ["web/*", "web/js/*", "web/js/views/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,71 +8,93 @@
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔥</text></svg>">
 </head>
 <body>
-  <div id="banner" class="banner hidden"></div>
-
-  <header class="topbar">
-    <div class="brand">
-      <span class="mark">🔥</span>
-      <div>
-        <h1 id="site-name">FiremeX</h1>
-        <p id="site-meta" class="muted">connecting…</p>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <span id="conn" class="pill pill-dim">offline</span>
-      <button id="reload-config" class="btn btn-ghost" type="button">Reload config</button>
-    </div>
-  </header>
-
-  <main>
-    <section id="active" class="hidden">
-      <h2 class="section-title alarm">Active incidents</h2>
-      <div id="active-list" class="incident-stack"></div>
-    </section>
-
-    <section>
-      <h2 class="section-title">Cameras</h2>
-      <div id="cameras" class="grid"></div>
-    </section>
-
-    <section>
-      <h2 class="section-title">Last 7 days</h2>
-      <div id="stats" class="grid stats"></div>
-    </section>
-
-    <section>
-      <div class="section-head">
-        <h2 class="section-title">Incident history</h2>
-        <label class="checkbox">
-          <input type="checkbox" id="unreviewed-only"> needs review only
-        </label>
-      </div>
-      <div id="history" class="history"></div>
-    </section>
-
-    <section>
-      <h2 class="section-title">Emergency contacts</h2>
-      <div id="contacts" class="grid"></div>
-      <p class="muted footnote">
-        Test calls place a real call through Twilio. Untested alerting is broken
-        alerting — test after every change to a phone number.
+  <!-- Login screen. Shown until /api/auth/me succeeds. -->
+  <div id="login-screen" class="login-screen hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="login-brand"><span class="mark">🔥</span><h1>FiremeX</h1></div>
+      <p class="muted login-sub">Fire &amp; smoke detection for CCTV</p>
+      <label class="field">
+        <span>Username</span>
+        <input id="login-username" name="username" autocomplete="username" required autofocus>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="login-error" class="form-error hidden"></p>
+      <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      <p id="login-hint" class="muted login-hint hidden">
+        First run? The default account is <code>admin</code> / <code>admin</code>.
+        You will be asked to change it immediately.
       </p>
-    </section>
+    </form>
+  </div>
 
-    <section>
-      <h2 class="section-title">Live activity</h2>
-      <pre id="log" class="log"></pre>
-    </section>
-  </main>
+  <!-- Forced password change. Blocks everything else server-side too. -->
+  <div id="pwchange-screen" class="login-screen hidden">
+    <form id="pwchange-form" class="login-card">
+      <div class="login-brand"><span class="mark">🔒</span><h1>Change password</h1></div>
+      <p class="muted login-sub">
+        This account still uses the default password. Choose a new one before continuing —
+        a fire dashboard left on <code>admin/admin</code> is a liability.
+      </p>
+      <label class="field">
+        <span>Current password</span>
+        <input id="pw-current" type="password" autocomplete="current-password" required>
+      </label>
+      <label class="field">
+        <span>New password</span>
+        <input id="pw-new" type="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <label class="field">
+        <span>Confirm new password</span>
+        <input id="pw-confirm" type="password" autocomplete="new-password" minlength="8" required>
+      </label>
+      <p id="pw-error" class="form-error hidden"></p>
+      <button class="btn btn-primary btn-block" type="submit">Set password</button>
+      <button class="btn btn-ghost btn-block" type="button" id="pw-logout">Sign out</button>
+    </form>
+  </div>
 
-  <footer>
-    <p>
-      FiremeX is a <strong>supplementary</strong> monitoring aid. It is not a certified
-      fire alarm system and must not replace code-compliant smoke/heat detectors,
-      sprinklers, or a monitored alarm panel.
-    </p>
-  </footer>
+  <!-- Main application shell. -->
+  <div id="app" class="hidden">
+    <div id="banner" class="banner hidden"></div>
 
-  <script src="/static/app.js"></script>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark">🔥</span>
+        <div>
+          <h1 id="site-name">FiremeX</h1>
+          <p id="site-meta" class="muted">connecting…</p>
+        </div>
+      </div>
+      <nav class="tabs" id="tabs">
+        <a href="#/cameras"       data-tab="cameras">Cameras</a>
+        <a href="#/incidents"     data-tab="incidents">Incidents</a>
+        <a href="#/notifications" data-tab="notifications" data-role="admin">Notifications</a>
+        <a href="#/settings"      data-tab="settings" data-role="admin">Settings</a>
+      </nav>
+      <div class="topbar-right">
+        <span id="conn" class="pill pill-dim">offline</span>
+        <span id="whoami" class="pill pill-info"></span>
+        <button id="logout" class="btn btn-ghost" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <main id="view"></main>
+
+    <footer>
+      <p>
+        FiremeX is a <strong>supplementary</strong> monitoring aid. It is not a certified
+        fire alarm system and must not replace code-compliant smoke/heat detectors,
+        sprinklers, or a monitored alarm panel.
+      </p>
+    </footer>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root"></div>
+
+  <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>

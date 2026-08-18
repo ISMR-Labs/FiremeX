@@ -50,7 +50,7 @@ See the whole thing working with no cameras, no model download and no Twilio acc
 ```bash
 pip install -e .
 firemex simulate
-# open http://localhost:8000
+# open http://localhost:8000 and sign in as admin / admin
 ```
 
 `simulate` runs synthetic cameras with a growing fire through the real pipeline — ingest,
@@ -67,6 +67,10 @@ firemex download-weights        # MIT-licensed YOLOv26-S fire/smoke checkpoint
 firemex check                   # validates config and opens every camera
 firemex serve                   # starts in SHADOW MODE — detects, records, never calls
 ```
+
+On first run FiremeX seeds an `admin` / `admin` account and **forces a password
+change before anything else works** — the API refuses every other request until it
+is done, because a fire dashboard left on default credentials is a liability.
 
 Leave it in shadow mode for **2–4 weeks**. Review the false positives in the dashboard, add exclusion
 zones, tune the thresholds. Only then:
@@ -88,6 +92,57 @@ docker compose --profile observability up -d   # + Prometheus and Grafana
 If your cameras are on a separate VLAN, switch the `firemex` service to `network_mode: host`.
 
 ---
+
+## The dashboard
+
+Four pages behind a login, served by the app itself with no build step.
+
+| Page | What it does |
+| --- | --- |
+| **Cameras** | Live feed wall with detection boxes drawn on the video, per-camera status, and the full configuration form: RTSP URL and substream, credentials, frames per second to process, day/night confidence thresholds per class, every confirmation rule, and exclusion zones previewed against a real frame. |
+| **Incidents** | Active alarms with a one-click cancel, 7-day statistics, and the false-positive review queue that feeds fine-tuning. |
+| **Notifications** | Emergency contacts and their escalation order, per-contact call/SMS channels and retries, and the exact spoken and texted wording — with a live preview and a real test-call button. |
+| **Settings** | Users and roles, the shadow/live alerting switch, model configuration (backend, weights, device, image size, batching), and site details. |
+
+### Accounts and roles
+
+| Role | Can |
+| --- | --- |
+| **Viewer** | See cameras, incidents and evidence. Change nothing. |
+| **Operator** | Everything a viewer can, plus cancel and review incidents. |
+| **Administrator** | Full access: cameras, contacts, model settings, users. |
+
+Security properties worth knowing, because this UI can silence a fire alert:
+
+- Passwords are hashed with `scrypt` (stdlib, memory-hard) and a per-user salt.
+- Sessions are server-side; the browser holds a random token in an `HttpOnly`
+  cookie and only its SHA-256 is stored, so a database dump cannot be replayed as a
+  login. Sessions are individually revocable and are dropped on password change,
+  role change, disable and delete.
+- Unsafe methods require a double-submit CSRF token.
+- Repeated failed logins lock an account for 5 minutes. Unknown usernames and wrong
+  passwords return the same message, so accounts cannot be enumerated.
+- **Camera passwords are never returned by the API**, not even to an admin — they
+  would end up in browser history, screenshots and support tickets. They are stored
+  in their own field, percent-encoded into the RTSP URL at connect time, and
+  redacted everywhere else.
+- `/metrics` needs a session or `FIREMEX_METRICS_TOKEN`; camera names are not
+  something to hand to the internet. `/api/health` stays open for probes, and
+  `/api/ready` is open but withholds *which* camera is down from anonymous callers.
+- Twilio webhooks are exempt from the session check and verified by request
+  signature instead, since Twilio cannot log in.
+
+### Live video
+
+Camera tiles use **MJPEG** from the ring buffer (`/api/cameras/{id}/live.mjpg`),
+with the current detections drawn on the frame. That renders in a plain `<img>` tag
+with no player library, no transcoding and no MediaMTX, and works on an offline
+control-room machine — and seeing what the model sees is the single most useful
+thing when tuning a site.
+
+It is not efficient at scale: every viewer costs a JPEG encode per frame, hence the
+frame-rate, resolution and viewer caps. For a large wall at full frame rate, put
+MediaMTX in front and use WebRTC.
 
 ## How confirmation works
 
@@ -322,7 +377,8 @@ positive rate, and negatives are the only thing that fixes that.
 | Database | PostgreSQL (SQLite by default) | Incidents are the audit trail. SQLite needs no setup for a single-box install. |
 | Cooldowns | Redis (optional) | `SET NX EX` makes alert de-duplication atomic across restarts and workers. |
 | Calls / SMS | Twilio Programmable Voice + Messaging | See [Emergency calling](#emergency-calling). |
-| Dashboard | **Vanilla JS + CSS, no build step** | Deliberate: it has to load on a locked-down control-room machine with no internet and no toolchain. The whole point of a fire alert UI is that it works when everything else is going wrong. Revisit if the UI outgrows one file. |
+| Dashboard | **Vanilla JS ES modules + CSS, no build step** | Deliberate: it has to load on a locked-down control-room machine with no internet and no toolchain. The whole point of a fire alert UI is that it works when everything else is going wrong. |
+| Auth | Server-side sessions, `scrypt` from the stdlib | No extra dependency for password hashing, and revocable sessions matter when the UI can silence an alarm. |
 | Live video | MediaMTX (RTSP → WebRTC/HLS) | Browsers cannot play RTSP. Don't reimplement this. |
 | Deployment | Docker Compose (+ NVIDIA Container Toolkit) | Single-command install on the customer's own box. |
 | Observability | Prometheus + Grafana, JSON logs | Per-camera fps and false-positive rate have to be visible or nobody will tune the thresholds. |
@@ -382,6 +438,16 @@ Interactive docs at `/docs`. Highlights:
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/auth/login` `logout` | Session login. `GET /api/auth/session` reports auth state without erroring. |
+| `POST /api/auth/password` | Change your own password |
+| `GET/POST/PATCH/DELETE /api/users` | User administration (admin) |
+| `GET /api/cameras/{id}/live.mjpg` | Live MJPEG with detection overlay |
+| `GET /api/cameras/{id}/snapshot.jpg` | Single current frame |
+| `GET /api/cameras/{id}/zones-preview.jpg` | Exclusion zones drawn over a real frame |
+| `POST /api/cameras/{id}/test` | Open the stream once and report the result |
+| `GET/PUT /api/alerting` | Notification settings and message templates |
+| `POST /api/alerting/preview` | Render the templates without saving |
+| `GET/PUT /api/detection` | Model configuration; rebuilds the detector when needed |
 | `GET /api/status` | Live pipeline state: cameras, fps, confirmation state, open incidents |
 | `GET /api/ready` | Readiness — 503 when a camera is down or stalled |
 | `GET /api/stats?days=7` | Incident counts and the false-positive rate |
@@ -427,12 +493,13 @@ firemex/
   ingest/              PyAV RTSP sources, ring buffer, camera worker, evidence recorder
   incident/            the confirmation state machine and exclusion zones
   notify/              Twilio voice/SMS, webhooks, escalation dispatcher, ack bus
-  api/                 FastAPI app, routes, Twilio webhook verification
-  web/                 dashboard (no build step)
+  auth.py              password hashing, session tokens, credential redaction
+  api/                 FastAPI app, routes, auth/CSRF, Twilio signature verification
+  web/                 dashboard: index.html, style.css, js/ (ES modules, no build)
   store.py, models.py  SQLAlchemy persistence — the audit trail
   metrics.py, cli.py
 deploy/                mediamtx, prometheus, alert rules
-tests/                 190 tests, no hardware or network required
+tests/                 262 tests, no hardware or network required
 ```
 
 ---
@@ -441,7 +508,7 @@ tests/                 190 tests, no hardware or network required
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                       # 190 tests, ~11s, no hardware or network
+pytest -q                       # 262 tests, ~34s, no hardware or network
 ruff check firemex tests
 ```
 
@@ -457,6 +524,9 @@ model, no camera and no Twilio account. Notable coverage:
   stream failure and frame-dropping under a saturated detector.
 - **`test_channel_order.py`** — pins the RGB/BGR convention of each real backend. Written after a
   channel swap made the detector completely blind while all other tests passed.
+- **`test_auth.py`** — the boundary: which endpoints need a session, what each role may do, CSRF
+  enforcement, lockout, account enumeration, the forced first password change, refusing to remove the
+  last administrator, and that camera passwords never leave the process.
 
 Optional extras: `.[video]` (PyAV, needed for real cameras and clips), `.[torch]`, `.[onnx]`.
 
@@ -472,7 +542,8 @@ Implemented:
 - [x] Twilio escalation: `<Gather>` acknowledgement, retries, chain, cooldown, signature verification
 - [x] Shadow mode and the false-positive review queue
 - [x] Evidence: annotated snapshots and pre/post-event clips
-- [x] Dashboard: live status, active incidents with cancel, history, review, test calls
+- [x] Dashboard: login with roles, live MJPEG feed wall, camera/contact/user management,
+      message templates, model settings
 - [x] REST + WebSocket API, Prometheus metrics, alert rules
 - [x] Docker Compose stack, CLI, simulation mode, CI
 
@@ -482,7 +553,9 @@ Next:
 - [ ] ONVIF camera auto-discovery
 - [ ] TensorRT / Jetson build and DeepStream path for >8 cameras per device
 - [ ] Fine-tuned FiremeX weights published to Hugging Face
-- [ ] Live camera tiles in the dashboard via MediaMTX WebRTC
+- [ ] WebRTC feed wall via MediaMTX, for many cameras at full frame rate
+- [ ] Click-to-draw exclusion zone editor on the live frame
+- [ ] SSO / reverse-proxy header auth for sites that already have an identity provider
 - [ ] Local siren / GPIO relay output — the fastest useful response is often on-site
 - [ ] Multi-site federation
 - [ ] Scheduled automatic self-test

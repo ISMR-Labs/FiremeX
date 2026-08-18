@@ -12,17 +12,35 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from ..config import CameraConfig, ContactConfig, SiteConfig, dump_site_config
+from ..config import (
+    AlertingConfig,
+    CameraConfig,
+    ContactConfig,
+    DetectionConfig,
+    SiteConfig,
+    dump_site_config,
+)
 from ..supervisor import Supervisor
-from .deps import get_supervisor
+from .deps import get_supervisor, require_admin
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api", tags=["configuration"])
+# Configuration is admin-only. Operators run incidents; they do not retune the
+# detector or edit who gets called.
+router = APIRouter(prefix="/api", tags=["configuration"], dependencies=[Depends(require_admin)])
 
 
 class SiteUpdate(BaseModel):
     name: str | None = None
     timezone: str | None = None
+
+
+class CameraUpsert(CameraConfig):
+    """Camera payload from the UI.
+
+    ``password`` is write-only: omitting it on an update keeps the stored one, so
+    editing a camera's frame rate does not require retyping its credentials. An
+    explicit empty string clears it.
+    """
 
 
 async def _persist(supervisor: Supervisor, site: SiteConfig) -> SiteConfig:
@@ -40,26 +58,28 @@ async def _persist(supervisor: Supervisor, site: SiteConfig) -> SiteConfig:
 
 @router.get("/cameras")
 async def list_cameras(supervisor: Supervisor = Depends(get_supervisor)) -> list[dict]:
-    return [camera.model_dump(mode="json") for camera in supervisor.site.cameras]
+    return [camera.public_dict() for camera in supervisor.site.cameras]
 
 
 @router.post("/cameras", status_code=status.HTTP_201_CREATED)
 async def create_camera(
-    camera: CameraConfig, supervisor: Supervisor = Depends(get_supervisor)
+    camera: CameraUpsert, supervisor: Supervisor = Depends(get_supervisor)
 ) -> dict:
     if supervisor.site.camera(camera.id) is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=f"camera {camera.id!r} already exists"
         )
     site = supervisor.site.model_copy(deep=True)
-    site.cameras.append(camera)
+    created = CameraConfig.model_validate(camera.model_dump())
+    site.cameras.append(created)
     await _persist(supervisor, site)
-    return camera.model_dump(mode="json")
+    log.info("camera %s created", created.id)
+    return created.public_dict()
 
 
 @router.put("/cameras/{camera_id}")
 async def update_camera(
-    camera_id: str, camera: CameraConfig, supervisor: Supervisor = Depends(get_supervisor)
+    camera_id: str, camera: CameraUpsert, supervisor: Supervisor = Depends(get_supervisor)
 ) -> dict:
     if camera.id != camera_id:
         raise HTTPException(
@@ -69,9 +89,53 @@ async def update_camera(
     index = next((i for i, c in enumerate(site.cameras) if c.id == camera_id), None)
     if index is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
-    site.cameras[index] = camera
+
+    payload = camera.model_dump()
+    if payload.get("password") is None:
+        # Not supplied: keep whatever is stored, so editing fps does not require
+        # retyping the camera password.
+        payload["password"] = site.cameras[index].password
+    elif payload["password"] == "":
+        payload["password"] = None
+    updated = CameraConfig.model_validate(payload)
+    site.cameras[index] = updated
     await _persist(supervisor, site)
-    return camera.model_dump(mode="json")
+    log.info("camera %s updated", camera_id)
+    return updated.public_dict()
+
+
+@router.post("/cameras/{camera_id}/test")
+async def test_camera(camera_id: str, supervisor: Supervisor = Depends(get_supervisor)) -> dict:
+    """Open the stream once and report what came back.
+
+    The button an operator presses after typing an RTSP URL, so a typo is caught
+    at configuration time instead of discovered during a fire.
+    """
+    camera = supervisor.site.camera(camera_id)
+    if camera is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
+
+    import asyncio
+
+    from ..auth import redact_url
+    from ..ingest.sources import RtspSource, StreamError
+
+    def probe() -> dict:
+        source = RtspSource(camera.detect_url)
+        try:
+            source.open()
+            image = source.read()
+        except (StreamError, RuntimeError) as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            source.close()
+        if image is None:
+            return {"ok": False, "error": "stream opened but delivered no frame"}
+        return {"ok": True, "width": int(image.shape[1]), "height": int(image.shape[0])}
+
+    result = await asyncio.to_thread(probe)
+    result["url"] = redact_url(camera.detect_url)
+    return result
 
 
 @router.delete("/cameras/{camera_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -82,6 +146,123 @@ async def delete_camera(camera_id: str, supervisor: Supervisor = Depends(get_sup
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="camera not found")
     site.cameras = remaining
     await _persist(supervisor, site)
+
+
+@router.get("/alerting")
+async def get_alerting(supervisor: Supervisor = Depends(get_supervisor)) -> dict:
+    """Notification settings, including the spoken and texted message templates."""
+    alerting = supervisor.site.alerting.model_dump(mode="json")
+    alerting["placeholders"] = {
+        "site": "Site name",
+        "camera": "Camera name",
+        "camera_id": "Camera id",
+        "location": "Camera location",
+        "labels": "What was detected, e.g. 'Fire and smoke'",
+        "severity": "warning or critical",
+        "link": "Snapshot or dashboard link (SMS only)",
+    }
+    alerting["shadow_mode"] = supervisor.shadow_mode
+    return alerting
+
+
+@router.put("/alerting")
+async def update_alerting(
+    body: AlertingConfig, supervisor: Supervisor = Depends(get_supervisor)
+) -> dict:
+    """Replace the notification settings.
+
+    Templates are rendered against a dummy context first: a typo like ``{camara}``
+    must fail here, not at the moment a phone should have rung.
+    """
+    from ..notify.base import AlertContext
+
+    probe = AlertContext(
+        incident_id="preview",
+        camera_id="cam",
+        camera_name="Camera",
+        location="Location",
+        site_name=supervisor.site.name,
+        labels="Fire and smoke",
+        severity="critical",
+    )
+    for field, template in (
+        ("voice_template", body.voice_template),
+        ("sms_template", body.sms_template),
+    ):
+        try:
+            probe.render(template)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{field} has an unknown placeholder: {exc}",
+            ) from exc
+
+    site = supervisor.site.model_copy(deep=True)
+    site.alerting = body
+    await _persist(supervisor, site)
+    log.info("alerting settings updated")
+    return site.alerting.model_dump(mode="json")
+
+
+@router.post("/alerting/preview")
+async def preview_alerting(
+    body: AlertingConfig, supervisor: Supervisor = Depends(get_supervisor)
+) -> dict:
+    """Render the templates without saving, so the UI can show the exact wording."""
+    from ..notify.base import AlertContext
+
+    camera = supervisor.site.cameras[0] if supervisor.site.cameras else None
+    context = AlertContext(
+        incident_id="preview",
+        camera_id=camera.id if camera else "loading-bay",
+        camera_name=camera.name if camera else "Loading Bay",
+        location=(camera.location if camera else "") or "Ground floor, east",
+        site_name=supervisor.site.name,
+        labels="Fire and smoke",
+        severity="critical",
+        snapshot_url="https://example/snapshot.jpg",
+    )
+    try:
+        return {
+            "voice": context.render(body.voice_template),
+            "sms": context.render(body.sms_template),
+        }
+    except (KeyError, IndexError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=f"unknown placeholder: {exc}"
+        ) from exc
+
+
+@router.get("/detection")
+async def get_detection(supervisor: Supervisor = Depends(get_supervisor)) -> dict:
+    return supervisor.detection_summary()
+
+
+@router.put("/detection")
+async def update_detection(
+    body: DetectionConfig, supervisor: Supervisor = Depends(get_supervisor)
+) -> dict:
+    """Change model settings.
+
+    Rebuilding the detector pauses detection for a moment, so the response says
+    whether that happened. A model path that fails to load is rolled back to the
+    previous working detector rather than leaving the site blind.
+    """
+    site = supervisor.site.model_copy(deep=True)
+    site.detection = body
+    before = supervisor._detector_fingerprint()
+    try:
+        await _persist(supervisor, site)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a bad model path lands here
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"could not apply detection settings: {exc}",
+        ) from exc
+    summary = supervisor.detection_summary()
+    summary["detector_rebuilt"] = before != supervisor._detector_fingerprint()
+    return summary
 
 
 @router.get("/contacts")

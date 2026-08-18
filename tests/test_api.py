@@ -8,12 +8,15 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from firemex import auth
 from firemex.api.app import create_app
 from firemex.config import CameraConfig, ContactConfig, SiteConfig, dump_site_config
 from firemex.detect.base import BBox, Detection
 from firemex.detect.stub import ScriptedDetector
 from firemex.incident.engine import Incident, Severity
 from firemex.supervisor import Supervisor
+
+ADMIN_PASSWORD = "test-admin-password"
 
 
 @pytest.fixture
@@ -67,17 +70,55 @@ def supervisor(settings, configured_site):
 
 
 @pytest.fixture
-def client(settings, supervisor):
+def anon_client(settings, supervisor):
+    """An unauthenticated client, for testing the auth boundary itself."""
     app = create_app(settings, supervisor=supervisor, start_supervisor=True)
     with TestClient(app) as test_client:
         yield test_client
 
 
+def sign_in(test_client, username="admin", password="admin", new_password=ADMIN_PASSWORD):
+    """Log in and, if the account is on its forced first password, replace it.
+
+    Also pins the CSRF token as a default header. The browser reads the token from
+    a JS-readable cookie and echoes it back; TestClient will not do that on its
+    own, so tests have to mirror the same double-submit the UI performs.
+    """
+    response = test_client.post(
+        "/api/auth/login", json={"username": username, "password": password}
+    )
+    assert response.status_code == 200, response.text
+    _pin_csrf(test_client)
+
+    if response.json().get("must_change_password"):
+        changed = test_client.post(
+            "/api/auth/password",
+            json={"current_password": password, "new_password": new_password},
+        )
+        assert changed.status_code == 200, changed.text
+        # The password change rotates the session, so re-pin.
+        _pin_csrf(test_client)
+    return test_client
+
+
+def _pin_csrf(test_client) -> None:
+    token = test_client.cookies.get(auth.CSRF_COOKIE)
+    assert token, "login should have set the CSRF cookie"
+    test_client.headers[auth.CSRF_HEADER] = token
+
+
+@pytest.fixture
+def client(anon_client):
+    """Signed in as the seeded admin, past the forced password change."""
+    return sign_in(anon_client)
+
+
 # ---- status and health ---------------------------------------------------
 
 
-def test_health_is_trivially_alive(client):
-    response = client.get("/api/health")
+def test_health_is_trivially_alive(anon_client):
+    """Liveness stays open so orchestrators can probe without credentials."""
+    response = anon_client.get("/api/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
@@ -119,6 +160,7 @@ def test_readiness_fails_while_a_camera_is_down(settings, configured_site):
     )
     app = create_app(settings, supervisor=supervisor, start_supervisor=True)
     with TestClient(app) as client:
+        sign_in(client)
         # Let the decode thread attempt its first connection and fail.
         time.sleep(0.15)
         response = client.get("/api/ready")
@@ -323,9 +365,11 @@ def test_review_records_the_operator_verdict(client, stored_incident):
     )
     assert response.status_code == 200
     assert response.json()["review"] == "false_positive"
-    assert client.get("/api/incidents/inc-1").json()["review_note"] == (
-        "sunset through the skylight"
-    )
+    note = client.get("/api/incidents/inc-1").json()["review_note"]
+    assert "sunset through the skylight" in note
+    # Attributed: a false-positive label feeds fine-tuning, so who judged it matters
+    # when the labels are later disputed.
+    assert "[admin]" in note
 
 
 def test_review_rejects_an_unknown_verdict(client, stored_incident):
@@ -430,18 +474,24 @@ def test_unsigned_webhooks_are_rejected_when_validation_is_on(settings, supervis
 # ---- dashboard ----------------------------------------------------------
 
 
-def test_dashboard_is_served(client):
-    response = client.get("/")
+def test_dashboard_is_served(anon_client):
+    response = anon_client.get("/")
     assert response.status_code == 200
     assert "FiremeX" in response.text
 
 
-def test_static_assets_are_served(client):
-    assert client.get("/static/app.js").status_code == 200
-    assert client.get("/static/style.css").status_code == 200
+def test_static_assets_are_served(anon_client):
+    """Served unauthenticated: the shell decides whether to show the login form,
+    and every byte of real data behind it needs a session."""
+    assert anon_client.get("/static/js/main.js").status_code == 200
+    assert anon_client.get("/static/js/views/cameras.js").status_code == 200
+    assert anon_client.get("/static/style.css").status_code == 200
 
 
-def test_openapi_schema_builds(client):
-    schema = client.get("/openapi.json").json()
+def test_openapi_schema_builds(anon_client):
+    schema = anon_client.get("/openapi.json").json()
     assert "/api/incidents" in schema["paths"]
     assert "/twiml/ack/{incident_id}" in schema["paths"]
+    assert "/api/auth/login" in schema["paths"]
+
+

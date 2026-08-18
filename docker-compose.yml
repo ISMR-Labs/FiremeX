@@ -11,6 +11,7 @@ services:
     environment:
       FIREMEX_DATABASE_URL: postgresql+psycopg2://firemex:${POSTGRES_PASSWORD:-firemex}@postgres:5432/firemex
       FIREMEX_REDIS_URL: redis://redis:6379/0
+      FIREMEX_METRICS_TOKEN: ${FIREMEX_METRICS_TOKEN:-}
     volumes:
       - ./config.yaml:/config/config.yaml:ro
       - ./weights:/weights:ro
@@ -78,6 +79,7 @@ services:
       - "9090:9090"
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     networks: [firemex]
 

@@ -34,6 +34,19 @@ def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.UTC)
 
 
+def as_utc(value: dt.datetime | None) -> dt.datetime | None:
+    """Attach UTC to a naive timestamp read back from the database.
+
+    SQLite has no timezone type, so ``DateTime(timezone=True)`` round-trips as
+    naive. Comparing that against an aware ``now`` raises TypeError, which would
+    surface as a 500 during login rather than anywhere obvious. Postgres returns
+    aware values and passes through untouched.
+    """
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=dt.UTC)
+
+
 class IncidentRecord(Base):
     __tablename__ = "incidents"
 
@@ -133,6 +146,81 @@ class AlertRecord(Base):
             "provider_id": self.provider_id,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class UserRecord(Base):
+    """A dashboard account.
+
+    Roles are coarse on purpose: viewer watches, operator acts on incidents,
+    admin configures. A fire dashboard with a confusing permission model is worse
+    than one with three obvious tiers.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="viewer")
+    #: True for the seeded admin/admin account. Login works, but every other
+    #: action is refused until the password is changed.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_login_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Consecutive failed logins, used to throttle brute force.
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    def as_dict(self) -> dict:
+        """Public shape. Never includes the password hash."""
+        return {
+            "id": self.id,
+            "username": self.username,
+            "role": self.role,
+            "must_change_password": self.must_change_password,
+            "disabled": self.disabled,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+            "locked": (lock := as_utc(self.locked_until)) is not None and lock > _utcnow(),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_by": self.created_by,
+        }
+
+
+class SessionRecord(Base):
+    """A logged-in browser session.
+
+    Only the SHA-256 of the cookie token is stored, so a database dump cannot be
+    replayed as a login. Rows are real so sessions stay individually revocable --
+    which matters when the UI can silence a fire alert.
+    """
+
+    __tablename__ = "sessions"
+
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    csrf_token: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    def as_dict(self) -> dict:
+        return {
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+            "user_agent": self.user_agent,
+            "ip": self.ip,
         }
 
 

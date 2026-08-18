@@ -4,23 +4,30 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from ..config import Settings
 from ..supervisor import Supervisor
-from .deps import get_settings, get_supervisor
+from .deps import (
+    get_settings,
+    get_supervisor,
+    metrics_access,
+    require_admin,
+    require_viewer,
+    resolve_principal,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
 
 
-@router.get("/api/status")
+@router.get("/api/status", dependencies=[Depends(require_viewer)])
 async def get_status(supervisor: Supervisor = Depends(get_supervisor)) -> dict:
     return supervisor.status()
 
 
-@router.get("/api/stats")
+@router.get("/api/stats", dependencies=[Depends(require_viewer)])
 async def get_stats(days: int = 7, supervisor: Supervisor = Depends(get_supervisor)) -> dict:
     return await supervisor.store.stats(days=days)
 
@@ -32,20 +39,29 @@ async def health() -> dict:
 
 
 @router.get("/api/ready")
-async def ready(response: Response, supervisor: Supervisor = Depends(get_supervisor)) -> dict:
-    """Readiness. A disconnected camera is a real degradation and reports as one."""
+async def ready(
+    request: Request, response: Response, supervisor: Supervisor = Depends(get_supervisor)
+) -> dict:
+    """Readiness. A disconnected camera is a real degradation and reports as one.
+
+    Left unauthenticated so orchestrators can probe it, but the detail -- which
+    camera, and why -- is only returned to a logged-in caller. An anonymous probe
+    gets the verdict and a count.
+    """
     ok, problems = supervisor.healthy()
     if not ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return {"ready": ok, "problems": problems}
+    if await resolve_principal(request) is not None:
+        return {"ready": ok, "problems": problems}
+    return {"ready": ok, "problem_count": len(problems)}
 
 
-@router.get("/metrics")
+@router.get("/metrics", dependencies=[Depends(metrics_access)])
 async def metrics_endpoint() -> Response:
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
-@router.post("/api/config/reload")
+@router.post("/api/config/reload", dependencies=[Depends(require_admin)])
 async def reload_config(supervisor: Supervisor = Depends(get_supervisor)) -> dict:
     try:
         site = await supervisor.reload_config()
@@ -57,7 +73,7 @@ async def reload_config(supervisor: Supervisor = Depends(get_supervisor)) -> dic
     return {"reloaded": True, "cameras": len(site.cameras), "contacts": len(site.contacts)}
 
 
-@router.get("/api/config")
+@router.get("/api/config", dependencies=[Depends(require_admin)])
 async def get_config(
     supervisor: Supervisor = Depends(get_supervisor),
     settings: Settings = Depends(get_settings),
@@ -66,10 +82,12 @@ async def get_config(
     return {
         "site": {"name": supervisor.site.name, "timezone": supervisor.site.timezone},
         "alerting": supervisor.site.alerting.model_dump(mode="json"),
-        "cameras": [c.model_dump(mode="json") for c in supervisor.site.cameras],
+        # public_dict, not model_dump: camera passwords must not leave the process.
+        "cameras": [c.public_dict() for c in supervisor.site.cameras],
         "contacts": [c.model_dump(mode="json") for c in supervisor.site.contacts],
+        "detection": supervisor.detection_summary(),
         "runtime": {
-            "shadow_mode": settings.shadow_mode,
+            "shadow_mode": supervisor.shadow_mode,
             "detector_backend": settings.detector_backend,
             "twilio_configured": settings.twilio_configured(),
             "public_base_url": settings.public_base_url,

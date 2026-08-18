@@ -10,3 +10,8 @@ scrape_configs:
     static_configs:
       - targets: ["firemex:8000"]
     metrics_path: /metrics
+    # /metrics requires a session or this token. Set FIREMEX_METRICS_TOKEN in .env
+    # and mirror it here; without it the scrape gets a 401.
+    # authorization:
+    #   type: Bearer
+    #   credentials: "your-metrics-token"

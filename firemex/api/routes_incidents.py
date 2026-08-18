@@ -11,10 +11,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from ..supervisor import Supervisor
-from .deps import get_supervisor
+from .deps import get_supervisor, require_operator, require_viewer
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/incidents", tags=["incidents"])
+# Reading incidents and evidence needs a session; acting on one needs the operator
+# role, applied per route below.
+router = APIRouter(
+    prefix="/api/incidents", tags=["incidents"], dependencies=[Depends(require_viewer)]
+)
 
 
 class ReviewRequest(BaseModel):
@@ -63,9 +67,10 @@ async def cancel_incident(
     incident_id: str,
     body: CancelRequest | None = None,
     supervisor: Supervisor = Depends(get_supervisor),
+    principal=Depends(require_operator),
 ) -> dict:
     """Stop escalation and mark the incident a false positive."""
-    reason = (body or CancelRequest()).reason
+    reason = f"{(body or CancelRequest()).reason} ({principal.username})"
     cancelled = await supervisor.cancel_incident(incident_id, reason)
     if not cancelled:
         raise HTTPException(
@@ -76,10 +81,17 @@ async def cancel_incident(
 
 @router.post("/{incident_id}/review")
 async def review_incident(
-    incident_id: str, body: ReviewRequest, supervisor: Supervisor = Depends(get_supervisor)
+    incident_id: str,
+    body: ReviewRequest,
+    supervisor: Supervisor = Depends(get_supervisor),
+    principal=Depends(require_operator),
 ) -> dict:
+    note = body.note or ""
+    # Stamp the reviewer: a false-positive label feeds fine-tuning, so knowing who
+    # judged it matters when the labels are later disputed.
+    note = f"{note} [{principal.username}]".strip()
     updated = await supervisor.store.update_incident(
-        incident_id, review=body.verdict, review_note=body.note
+        incident_id, review=body.verdict, review_note=note
     )
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="incident not found")

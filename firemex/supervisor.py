@@ -63,6 +63,48 @@ class Supervisor:
         self._redis = None
         self._clip_tasks: set[asyncio.Task] = set()
         self._started = False
+        #: Fingerprint of the detector settings currently in force, so a config
+        #: change can tell whether the model actually needs rebuilding.
+        self._detector_state: tuple | None = None
+
+    # ---- effective settings ----------------------------------------------
+
+    @property
+    def shadow_mode(self) -> bool:
+        """Master alerting switch.
+
+        The site config wins when it expresses an opinion, otherwise the
+        environment does. Resolved through one property so no call site can read a
+        stale copy and place a call the operator thought was suppressed.
+        """
+        configured = self.site.detection.shadow_mode
+        return self.settings.shadow_mode if configured is None else configured
+
+    def detector_settings(self) -> Settings:
+        """Settings with the site's detection overrides layered on top."""
+        detection = self.site.detection
+        overrides = {
+            "detector_backend": detection.backend,
+            "model_path": detection.model_path,
+            "device": detection.device,
+            "batch_size": detection.batch_size,
+            "batch_timeout_ms": detection.batch_timeout_ms,
+            "image_size": detection.image_size,
+        }
+        applied = {k: v for k, v in overrides.items() if v is not None}
+        return self.settings.model_copy(update=applied) if applied else self.settings
+
+    def _detector_fingerprint(self) -> tuple:
+        """Values that require rebuilding the detector when they change."""
+        effective = self.detector_settings()
+        return (
+            effective.detector_backend,
+            effective.model_path,
+            effective.device,
+            effective.image_size,
+            effective.batch_size,
+            effective.batch_timeout_ms,
+        )
 
     # ---- lifecycle --------------------------------------------------------
 
@@ -80,13 +122,15 @@ class Supervisor:
         self.settings.ensure_dirs()
         self.store.create_all()
 
-        detector = self._detector or build_detector(self.settings)
+        effective = self.detector_settings()
+        detector = self._detector or build_detector(effective)
         self._inference = InferenceService(
             detector,
-            batch_size=self.settings.batch_size,
-            batch_timeout_ms=self.settings.batch_timeout_ms,
+            batch_size=effective.batch_size,
+            batch_timeout_ms=effective.batch_timeout_ms,
         )
         await self._inference.start()
+        self._detector_state = self._detector_fingerprint()
 
         self.dispatcher = AlertDispatcher(
             site=self.site,
@@ -94,7 +138,7 @@ class Supervisor:
             ack_bus=self.ack_bus,
             cooldowns=await self._build_cooldowns(),
             webhook=WebhookChannel(self.site.alerting.webhooks),
-            shadow_mode=self.settings.shadow_mode,
+            shadow_mode=self.shadow_mode,
             dashboard_url=self.settings.public_base_url,
             on_run_update=self._on_run_update,
         )
@@ -104,7 +148,7 @@ class Supervisor:
                 await self._start_worker(camera)
 
         self._started = True
-        if self.settings.shadow_mode:
+        if self.shadow_mode:
             log.warning(
                 "FiremeX running in SHADOW MODE -- incidents are recorded but no calls "
                 "are placed. Set FIREMEX_SHADOW_MODE=false to go live."
@@ -140,7 +184,7 @@ class Supervisor:
     def _build_channels(self) -> dict:
         voice = TwilioVoiceChannel(self.settings)
         sms = TwilioSmsChannel(self.settings)
-        if not voice.available and not self.settings.shadow_mode:
+        if not voice.available and not self.shadow_mode:
             log.error(
                 "Twilio is not configured but shadow mode is off -- confirmed "
                 "incidents will NOT reach anyone by phone."
@@ -212,7 +256,7 @@ class Supervisor:
                 location=camera.location,
                 detections=event.observation.detections,
                 assessment=camera_engine.last_assessment if camera_engine else None,
-                shadow_mode=self.settings.shadow_mode,
+                shadow_mode=self.shadow_mode,
             )
             # Snapshot before dispatch so the SMS link resolves by the time the
             # phone rings.
@@ -287,7 +331,7 @@ class Supervisor:
             "peak_confidence": round(incident.peak_confidence, 4),
             "growth_ratio": round(incident.growth_ratio, 3),
             "opened_at": incident.opened_wall,
-            "shadow_mode": self.settings.shadow_mode,
+            "shadow_mode": self.shadow_mode,
         }
 
     async def _on_run_update(self, run: DispatchRun) -> None:
@@ -350,6 +394,12 @@ class Supervisor:
         if self.dispatcher is not None:
             self.dispatcher.site = site
             self.dispatcher.webhook = WebhookChannel(site.alerting.webhooks)
+            self.dispatcher.shadow_mode = self.shadow_mode
+
+        # A model change needs the inference service rebuilt, which briefly pauses
+        # detection -- so it only happens when something relevant actually changed.
+        if self._started and self._detector_state != self._detector_fingerprint():
+            await self._restart_inference()
 
         wanted = {c.id: c for c in site.cameras if c.enabled}
         for camera_id in list(self.workers):
@@ -368,6 +418,59 @@ class Supervisor:
         log.info("config reloaded: %d camera(s) running", len(self.workers))
         self.bus.publish({"type": "config.reloaded", "cameras": len(self.workers)})
         return site
+
+    async def _restart_inference(self) -> None:
+        """Swap in a newly built detector.
+
+        Cameras keep decoding throughout; their submissions fail while the service
+        is down and the workers drop those frames, which is the same path as any
+        other inference backlog. Detection is blind for the duration, so this is
+        logged at warning level.
+        """
+        if self._detector is not None:
+            # An injected detector (tests, simulation) is not ours to replace.
+            log.info("detector was injected; not rebuilding from config")
+            self._detector_state = self._detector_fingerprint()
+            return
+
+        effective = self.detector_settings()
+        log.warning(
+            "rebuilding detector: backend=%s model=%s device=%s imgsz=%d "
+            "-- detection is paused until this completes",
+            effective.detector_backend,
+            effective.model_path,
+            effective.device,
+            effective.image_size,
+        )
+        old, self._inference = self._inference, None
+        if old is not None:
+            await old.stop()
+        try:
+            detector = build_detector(effective)
+            service = InferenceService(
+                detector,
+                batch_size=effective.batch_size,
+                batch_timeout_ms=effective.batch_timeout_ms,
+            )
+            await service.start()
+        except Exception:
+            log.exception("failed to build the new detector; restoring the previous one")
+            # Never leave the pipeline with no detector: fall back to the settings
+            # that were known to work, so a bad model path cannot blind the site.
+            fallback = build_detector(self.settings)
+            service = InferenceService(
+                fallback,
+                batch_size=self.settings.batch_size,
+                batch_timeout_ms=self.settings.batch_timeout_ms,
+            )
+            await service.start()
+            self._inference = service
+            self._detector_state = self._detector_fingerprint()
+            raise
+        self._inference = service
+        self._detector_state = self._detector_fingerprint()
+        log.warning("detector rebuilt: %s", detector.name)
+        self.bus.publish({"type": "detector.reloaded", "backend": detector.name})
 
     # ---- status -----------------------------------------------------------
 
@@ -389,9 +492,10 @@ class Supervisor:
         return {
             "site": self.site.name,
             "timezone": self.site.timezone,
-            "shadow_mode": self.settings.shadow_mode,
+            "shadow_mode": self.shadow_mode,
             "detector": self._inference.detector.name if self._inference else None,
             "twilio_configured": self.settings.twilio_configured(),
+            "detection_settings": self.detection_summary(),
             "active_incidents": self.engine.active_count(),
             # Full detail, not just a count: a dashboard opened *during* a fire has
             # no incident.opened event to replay, and the cancel button must still
@@ -403,6 +507,31 @@ class Supervisor:
             "contacts": [
                 {"id": c.id, "name": c.name, "channels": c.channels} for c in self.site.contacts
             ],
+        }
+
+    def detection_summary(self) -> dict:
+        """Effective model settings, with the source of each value.
+
+        The Settings page needs to show whether a value came from the environment
+        or from a UI override, or an operator cannot tell why their change appears
+        to have done nothing.
+        """
+        effective = self.detector_settings()
+        detection = self.site.detection
+        return {
+            "backend": effective.detector_backend,
+            "model_path": effective.model_path,
+            "device": effective.device,
+            "batch_size": effective.batch_size,
+            "batch_timeout_ms": effective.batch_timeout_ms,
+            "image_size": effective.image_size,
+            "shadow_mode": self.shadow_mode,
+            "overridden": sorted(
+                key
+                for key, value in detection.model_dump(exclude_none=True).items()
+                if value is not None
+            ),
+            "running_backend": self._inference.detector.name if self._inference else None,
         }
 
     def open_incidents(self) -> list[dict]:
@@ -440,9 +569,9 @@ class Supervisor:
                 age = time.monotonic() - last
                 if age > worker.stall_timeout:
                     problems.append(f"camera {camera.id} stalled: no frame for {age:.0f}s")
-        if not self.settings.shadow_mode and not self.settings.twilio_configured():
+        if not self.shadow_mode and not self.settings.twilio_configured():
             problems.append("live mode with no Twilio credentials")
-        if not self.settings.shadow_mode:
+        if not self.shadow_mode:
             for camera in self.site.cameras:
                 if camera.enabled and not self.site.escalation_chain(camera.id):
                     problems.append(f"camera {camera.id} has no contacts")

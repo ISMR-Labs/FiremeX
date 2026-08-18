@@ -8,14 +8,23 @@ import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from .. import auth
 from ..config import Settings, load_site_config
 from ..logging_conf import configure_logging
 from ..supervisor import Supervisor
-from . import routes_config, routes_incidents, routes_system, routes_twiml
+from . import (
+    routes_auth,
+    routes_config,
+    routes_incidents,
+    routes_stream,
+    routes_system,
+    routes_twiml,
+    routes_users,
+)
 from .deps import get_supervisor
 
 log = logging.getLogger(__name__)
@@ -26,12 +35,31 @@ live_router = APIRouter(tags=["live"])
 
 @live_router.websocket("/api/live")
 async def live_updates(websocket: WebSocket) -> None:
-    """Stream detections, incidents and alert progress to the dashboard."""
+    """Stream detections, incidents and alert progress to the dashboard.
+
+    Authenticated from the session cookie, which the browser sends with the
+    WebSocket handshake. An unauthenticated socket is closed rather than accepted:
+    these events name cameras and incidents.
+    """
     supervisor: Supervisor | None = getattr(websocket.app.state, "supervisor", None)
-    await websocket.accept()
     if supervisor is None:  # pragma: no cover - only before startup
         await websocket.close(code=1013)
         return
+
+    token = websocket.cookies.get(auth.SESSION_COOKIE)
+    resolved = (
+        await supervisor.store.resolve_session(auth.hash_session_token(token)) if token else None
+    )
+    if resolved is None:
+        # 1008 = policy violation. The dashboard treats it as "go to login".
+        await websocket.close(code=1008)
+        return
+    principal, _csrf = resolved
+    if principal.must_change_password:
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
     try:
         await websocket.send_json({"type": "status", **supervisor.status()})
         async for event in supervisor.bus.subscribe():
@@ -64,6 +92,22 @@ def create_app(
         app.state.supervisor = instance
         if start_supervisor:
             await instance.start()
+        else:
+            # Tests and embedded use still need the schema to exist.
+            settings.ensure_dirs()
+            instance.store.create_all()
+
+        # First run: seed admin/admin, flagged so it cannot be used for anything
+        # except changing itself.
+        if await instance.store.ensure_default_admin():
+            log.warning(
+                "no users existed, so the default account %r was created with password %r. "
+                "You must change it at first login; nothing else will work until you do.",
+                auth.DEFAULT_USERNAME,
+                auth.DEFAULT_PASSWORD,
+            )
+        await instance.store.purge_expired_sessions()
+
         try:
             yield
         finally:
@@ -84,9 +128,13 @@ def create_app(
     )
     app.state.settings = settings
 
+    app.include_router(routes_auth.router)
+    app.include_router(routes_users.router)
     app.include_router(routes_system.router)
     app.include_router(routes_config.router)
+    app.include_router(routes_stream.router)
     app.include_router(routes_incidents.router)
+    # Twilio cannot log in: these are protected by signature verification instead.
     app.include_router(routes_twiml.router)
     app.include_router(live_router)
 
@@ -95,6 +143,9 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         async def dashboard() -> FileResponse:
+            # The shell is served unauthenticated and decides for itself whether to
+            # show the login screen; every byte of actual data behind it requires a
+            # session.
             return FileResponse(WEB_DIR / "index.html")
 
     else:  # pragma: no cover - only if the package is installed without web assets
@@ -106,4 +157,4 @@ def create_app(
     return app
 
 
-__all__ = ["create_app", "get_supervisor", "Depends"]
+__all__ = ["create_app", "get_supervisor"]
