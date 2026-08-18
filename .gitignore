@@ -17,3 +17,6 @@ snapshots/
 .ruff_cache/
 *.egg-info/
 config.yaml
+
+# Local deployment notes for this machine, not the project
+RUNNING.md
