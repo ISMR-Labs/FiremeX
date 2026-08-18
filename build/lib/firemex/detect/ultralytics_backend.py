@@ -5,17 +5,6 @@ ONNX backend: it is 2-4x faster on the same hardware and drops the torch install
 
 Licensing note: Ultralytics YOLO is AGPL-3.0. If FiremeX is ever distributed as a
 closed product, ship the ONNX runtime path instead of this module.
-
-Channel order -- the trap in this file. FiremeX carries frames as **RGB**
-throughout, but the Ultralytics ``predict()`` API treats a numpy array as
-**BGR** (the OpenCV convention) and flips it internally before building the
-tensor. Handing it RGB therefore swaps red and blue, and since fire detection is
-overwhelmingly a colour cue, the model goes quiet instead of erroring: real
-flames score nothing at all. So this backend converts to BGR on the way in.
-
-The ONNX backend is the mirror image: it builds the input tensor itself, and the
-exported graph expects the post-flip **RGB** layout, so it must *not* convert.
-Both conventions are pinned by tests in ``tests/test_channel_order.py``.
 """
 
 from __future__ import annotations
@@ -39,6 +28,7 @@ class UltralyticsDetector:
         image_size: int = 640,
         confidence_floor: float = 0.15,
         iou: float = 0.45,
+        half: bool | None = None,
     ) -> None:
         try:
             from ultralytics import YOLO
@@ -55,6 +45,7 @@ class UltralyticsDetector:
         # thresholds unreachable.
         self.confidence_floor = confidence_floor
         self.iou = iou
+        self.half = half if half is not None else device.startswith("cuda")
         self.model = YOLO(model_path)
         self._names: dict[int, str] = dict(self.model.names or {})
         self._label_map = {idx: canonical_label(name) for idx, name in self._names.items()}
@@ -72,16 +63,13 @@ class UltralyticsDetector:
     def predict(self, images: list[np.ndarray]) -> list[list[Detection]]:
         if not images:
             return []
-        # RGB -> BGR. See the channel-order note at the top of this module: the
-        # Ultralytics numpy path assumes BGR, and getting this wrong makes the
-        # detector silently blind rather than raising.
-        bgr = [np.ascontiguousarray(image[:, :, :3][:, :, ::-1]) for image in images]
         results = self.model.predict(
-            bgr,
+            images,
             imgsz=self.image_size,
             conf=self.confidence_floor,
             iou=self.iou,
             device=self.device,
+            half=self.half,
             verbose=False,
         )
         return [self._convert(result) for result in results]

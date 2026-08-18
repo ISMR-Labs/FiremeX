@@ -226,6 +226,19 @@ public weights, validate on *your own* camera footage, then fine-tune.
 `firemex download-weights` fetches the YOLOv26-S checkpoint: MIT-licensed (which matters for a product),
 strongest published numbers of the set, loads in three lines with Ultralytics.
 
+Verified against this checkpoint on CPU (batched, 640px, ~113 ms/frame):
+
+| Input | Result |
+| --- | --- |
+| Campfire at night | `fire 86%` |
+| Wildfire smoke plume | `smoke 57%` |
+| Orange sunset | nothing — the `other` class is dropped |
+| Hi-vis safety vest | nothing |
+| Empty warehouse interior | nothing |
+
+Two of those negatives are the textbook false positives for this task, and both are clean on this
+checkpoint. That is encouraging, not conclusive: five stills are not a site survey. Run shadow mode.
+
 **Treat every published mAP as a ceiling under ideal conditions.** Research models on the
 [D-Fire benchmark](https://github.com/gaiasd/DFireDataset) cluster at **58–81% mAP@50** depending on
 architecture and augmentation — a far more honest expectation for real CCTV with IR night mode,
@@ -247,6 +260,24 @@ Three interchangeable backends behind one `Detector` protocol
 New checkpoints often use different class names (`Fire`, `flame`, `Active flames`, `smoke_plume`).
 `canonical_label()` normalises them onto `fire`/`smoke` and **drops anything unrecognised** — a
 checkpoint that also emits `person` must never have people escalated into a fire alert.
+
+This is load-bearing, not theoretical. The default YOLOv26-S checkpoint emits three classes —
+`fire`, `other`, `smoke` — and `other` is what it fires on for an orange sunset. Dropping it is why a
+sunset produces no detection at all rather than a 3am phone call.
+
+### Channel order — the trap
+
+FiremeX carries frames as **RGB** throughout. The two backends need opposite conventions:
+
+- **Ultralytics `predict()` assumes BGR** for numpy input (the OpenCV convention) and flips it
+  internally. So `ultralytics_backend.py` converts RGB→BGR on the way in.
+- **The exported ONNX graph expects RGB**, because that is the post-flip layout Ultralytics feeds its
+  own tensor. So `onnx_backend.py` must *not* convert.
+
+Getting this wrong does not raise — it makes the detector **silently blind**, because fire detection is
+overwhelmingly a colour cue and swapping red for blue leaves real flames scoring nothing. Both
+conventions are pinned by [`tests/test_channel_order.py`](tests/test_channel_order.py). If you add a
+backend, add a test there.
 
 ---
 
@@ -401,7 +432,7 @@ firemex/
   store.py, models.py  SQLAlchemy persistence — the audit trail
   metrics.py, cli.py
 deploy/                mediamtx, prometheus, alert rules
-tests/                 184 tests, no hardware or network required
+tests/                 190 tests, no hardware or network required
 ```
 
 ---
@@ -410,7 +441,7 @@ tests/                 184 tests, no hardware or network required
 
 ```bash
 pip install -e ".[dev]"
-pytest -q                       # 184 tests, ~10s, no hardware or network
+pytest -q                       # 190 tests, ~11s, no hardware or network
 ruff check firemex tests
 ```
 
@@ -424,6 +455,8 @@ model, no camera and no Twilio account. Notable coverage:
   incident, cancel inside the grace window, never call in shadow mode.
 - **`test_pipeline.py`** — the real `Supervisor` end to end on a synthetic fire, plus reconnect after
   stream failure and frame-dropping under a saturated detector.
+- **`test_channel_order.py`** — pins the RGB/BGR convention of each real backend. Written after a
+  channel swap made the detector completely blind while all other tests passed.
 
 Optional extras: `.[video]` (PyAV, needed for real cameras and clips), `.[torch]`, `.[onnx]`.
 

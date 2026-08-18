@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FiremeX</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔥</text></svg>">
+</head>
+<body>
+  <div id="banner" class="banner hidden"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark">🔥</span>
+      <div>
+        <h1 id="site-name">FiremeX</h1>
+        <p id="site-meta" class="muted">connecting…</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="conn" class="pill pill-dim">offline</span>
+      <button id="reload-config" class="btn btn-ghost" type="button">Reload config</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="active" class="hidden">
+      <h2 class="section-title alarm">Active incidents</h2>
+      <div id="active-list" class="incident-stack"></div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Cameras</h2>
+      <div id="cameras" class="grid"></div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Last 7 days</h2>
+      <div id="stats" class="grid stats"></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2 class="section-title">Incident history</h2>
+        <label class="checkbox">
+          <input type="checkbox" id="unreviewed-only"> needs review only
+        </label>
+      </div>
+      <div id="history" class="history"></div>
+    </section>
+
+    <section>
+      <h2 class="section-title">Emergency contacts</h2>
+      <div id="contacts" class="grid"></div>
+      <p class="muted footnote">
+        Test calls place a real call through Twilio. Untested alerting is broken
+        alerting — test after every change to a phone number.
+      </p>
+    </section>
+
+    <section>
+      <h2 class="section-title">Live activity</h2>
+      <pre id="log" class="log"></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      FiremeX is a <strong>supplementary</strong> monitoring aid. It is not a certified
+      fire alarm system and must not replace code-compliant smoke/heat detectors,
+      sprinklers, or a monitored alarm panel.
+    </p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
