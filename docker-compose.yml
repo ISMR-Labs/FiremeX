@@ -1,0 +1,104 @@
+name: firemex
+
+services:
+  firemex:
+    build: .
+    image: ghcr.io/ismr-labs/firemex:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      FIREMEX_DATABASE_URL: postgresql+psycopg2://firemex:${POSTGRES_PASSWORD:-firemex}@postgres:5432/firemex
+      FIREMEX_REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      - ./weights:/weights:ro
+      - firemex-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Cameras usually live on a LAN the container must reach. If your NVR is on a
+    # separate VLAN, switch to network_mode: host instead of publishing a port.
+    networks: [firemex]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: firemex
+      POSTGRES_USER: firemex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-firemex}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U firemex -d firemex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [firemex]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Alert cooldowns must survive a restart, or a flapping service could
+    # re-alert on an incident it already called about.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [firemex]
+
+  # RTSP -> WebRTC/HLS gateway. Browsers cannot play RTSP natively, so the live
+  # view in the dashboard goes through here rather than being reimplemented.
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    environment:
+      MTX_PROTOCOLS: tcp
+    ports:
+      - "8554:8554"   # RTSP
+      - "8889:8889"   # WebRTC
+      - "8888:8888"   # HLS
+    volumes:
+      - ./deploy/mediamtx.yml:/mediamtx.yml:ro
+    networks: [firemex]
+
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [firemex]
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks: [firemex]
+
+networks:
+  firemex:
+
+volumes:
+  firemex-data:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+data
+clips
+snapshots
+weights
+*.pt
+*.onnx
+*.engine
+.env
+config.yaml

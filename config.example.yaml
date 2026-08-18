@@ -1,0 +1,38 @@
+site:
+  name: "My Site"
+  timezone: "UTC"
+
+cameras:
+  - id: front-door
+    name: "Front Door"
+    location: "Ground floor, north"
+    rtsp: "rtsp://user:password@192.168.1.40:554/Streaming/Channels/101"
+    # Detect on the low-res substream; the main stream is only decoded for clips.
+    substream_rtsp: "rtsp://user:password@192.168.1.40:554/Streaming/Channels/102"
+    sample_fps: 3
+    thresholds:
+      day: {fire: 0.40, smoke: 0.45}
+      night: {fire: 0.50, smoke: 0.55}
+    confirm:
+      frames_required: 6
+      window: 10
+      require_growth: true
+    # Normalised polygons that are ignored. Add one over every window, stove top,
+    # welding bay, monitor and smoking area -- this is the cheapest false-positive fix.
+    exclude_zones: []
+    contacts: [security-desk]
+
+contacts:
+  - id: security-desk
+    name: "Security Desk"
+    phone: "+10000000000"
+    channels: [call, sms]
+    retries: 2
+    escalate_after_seconds: 45
+
+alerting:
+  # Grace period during which an operator can cancel before any phone rings.
+  confirm_delay_seconds: 20
+  cooldown_minutes: 10
+  default_contacts: [security-desk]
+  webhooks: []

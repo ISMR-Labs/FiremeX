@@ -1,0 +1,29 @@
+# MediaMTX config for the dashboard's live view.
+#
+# Add one path per camera. MediaMTX pulls the RTSP stream on demand and republishes
+# it as WebRTC (low latency, best for a live wall) and HLS (works everywhere).
+# FiremeX itself talks to the cameras directly -- this gateway exists only so a
+# browser can display them.
+
+logLevel: info
+readTimeout: 10s
+writeTimeout: 10s
+
+# Pull streams only while somebody is watching, so idle tabs cost no bandwidth.
+rtspTransport: tcp
+
+webrtc: yes
+webrtcAddress: :8889
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+
+paths:
+  # Example. Match the path name to the camera id in config.yaml so the dashboard
+  # can find it, and prefer the substream: the live view does not need 4K.
+  #
+  # front-door:
+  #   source: rtsp://user:password@192.168.1.40:554/Streaming/Channels/102
+  #   sourceOnDemand: yes
+
+  all_others:

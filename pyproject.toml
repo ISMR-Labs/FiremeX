@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firemex"
+version = "0.1.0"
+description = "Self-hosted fire & smoke detection for CCTV/IP cameras with automated emergency voice calls"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0",
+    "psycopg2-binary>=2.9",
+    "redis>=5.0",
+    "twilio>=9.0",
+    "pillow>=10.0",
+    "prometheus-client>=0.20",
+    "pyyaml>=6.0",
+    # Twilio posts form-encoded webhooks; FastAPI's Form() requires this.
+    "python-multipart>=0.0.9",
+    "numpy>=1.26",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+# Video decode/encode. Required to talk to real cameras.
+video = ["av>=12.0"]
+# PyTorch detector backend. Large download (~2.5 GB with CUDA).
+torch = ["ultralytics>=8.3", "torch>=2.4"]
+# Lean production inference. Prefer this over `torch` for deployment.
+onnx = ["onnxruntime>=1.19"]
+onnx-gpu = ["onnxruntime-gpu>=1.19"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "anyio>=4.0"]
+
+[project.scripts]
+firemex = "firemex.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["firemex*"]
+
+[tool.setuptools.package-data]
+firemex = ["web/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = ["B008"]

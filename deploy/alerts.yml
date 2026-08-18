@@ -1,0 +1,67 @@
+# Alerts about the detector itself.
+#
+# A fire detector that has quietly stopped watching is worse than no detector,
+# because everyone believes they are covered. These rules exist to make that
+# state impossible to miss.
+
+groups:
+  - name: firemex
+    rules:
+      - alert: FiremexCameraDown
+        expr: firemex_camera_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Camera {{ $labels.camera }} has been disconnected for 5 minutes"
+          description: "This camera is not being monitored. Check the stream and the network."
+
+      - alert: FiremexCameraStalled
+        expr: firemex_camera_last_frame_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Camera {{ $labels.camera }} is connected but delivering no frames"
+          description: "A stalled stream looks like a quiet room. The watchdog should have reconnected it."
+
+      - alert: FiremexInferenceBacklog
+        expr: firemex_inference_queue_depth > 8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference is falling behind"
+          description: "Frames are being dropped. Reduce sample_fps, use substreams, or add GPU capacity."
+
+      - alert: FiremexFramesDropping
+        expr: rate(firemex_frames_dropped_total[10m]) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Dropping more than one frame per second on {{ $labels.camera }}"
+
+      - alert: FiremexAlertFailures
+        expr: increase(firemex_alerts_sent_total{outcome="failed"}[15m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "An alert failed to send"
+          description: "A confirmed incident may not have reached anyone. Check Twilio credentials and balance."
+
+      - alert: FiremexUnacknowledgedIncident
+        expr: increase(firemex_escalations_total[1h]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: "Escalation chains are running to exhaustion"
+          description: "Contacts are not acknowledging. Verify the numbers with `firemex selftest`."
+
+      - alert: FiremexNoSelfTest
+        expr: time() - firemex_last_self_test_timestamp_seconds > 2678400
+        labels:
+          severity: warning
+        annotations:
+          summary: "No alerting self-test in over a month"
+          description: "Untested alerting is broken alerting. Run `firemex selftest`."

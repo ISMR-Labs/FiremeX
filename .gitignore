@@ -13,3 +13,7 @@ dist/
 data/
 clips/
 snapshots/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+config.yaml
