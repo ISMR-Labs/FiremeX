@@ -1,0 +1,15 @@
+weights/
+*.pt
+*.onnx
+*.engine
+.env
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+dist/
+.DS_Store
+data/
+clips/
+snapshots/
