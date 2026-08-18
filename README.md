@@ -306,6 +306,10 @@ Three interchangeable backends behind one `Detector` protocol
 
 - **`onnx`** — the recommended production path. 2–4× the throughput of PyTorch on the same hardware, and
   no torch install. Export once: `yolo export model=weights/firemex.pt format=onnx imgsz=640 dynamic=True`.
+  Handles both output layouts Ultralytics produces: raw `(1, 4+nc, n)` needing NMS, and end-to-end
+  `(1, n, 6)` with NMS already inside the graph — which is what newer heads like YOLOv26 emit by
+  default. Which one you have is recorded as `end2end` in the model metadata; guessing from shape alone
+  is ambiguous, since a 2-class raw export is also 6 columns wide.
 - **`ultralytics`** — PyTorch, for development, evaluation and fine-tuning.
 - **`stub`** — a colour/luminance heuristic needing no weights at all. It exists so the whole pipeline can
   be developed, tested and demonstrated without a 2.5 GB install, and so CI runs end to end. It is

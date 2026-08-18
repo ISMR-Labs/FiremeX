@@ -52,7 +52,21 @@ async def _persist(supervisor: Supervisor, site: SiteConfig) -> SiteConfig:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid configuration: {exc}"
         ) from exc
-    dump_site_config(validated, supervisor.settings.config_path)
+    try:
+        dump_site_config(validated, supervisor.settings.config_path)
+    except OSError as exc:
+        # Usually a read-only mount or a permissions mistake. Say so plainly:
+        # an ASGI traceback tells the operator nothing they can act on.
+        path = supervisor.settings.config_path
+        log.error("cannot write the site config to %s: %s", path, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"could not save the configuration to {path}: {exc.strerror or exc}. "
+                "The dashboard writes this file, so it must be writable by the server "
+                "(in Docker, check that the config.yaml mount is not read-only)."
+            ),
+        ) from exc
     return await supervisor.reload_config()
 
 

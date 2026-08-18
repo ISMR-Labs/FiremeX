@@ -495,3 +495,25 @@ def test_openapi_schema_builds(anon_client):
     assert "/api/auth/login" in schema["paths"]
 
 
+
+
+def test_unwritable_config_reports_an_actionable_error(client, settings, tmp_path, monkeypatch):
+    """A read-only config mount is a real deployment mistake — the Docker compose
+    file shipped with exactly that bug. The operator must be told what to fix, not
+    handed an ASGI traceback."""
+    from firemex.api import routes_config
+
+    def refuse(*_args, **_kwargs):
+        raise OSError(30, "Read-only file system")
+
+    monkeypatch.setattr(routes_config, "dump_site_config", refuse)
+
+    response = client.post(
+        "/api/cameras",
+        json={"id": "cam-ro", "name": "Read only", "rtsp": "rtsp://example.invalid/ro"},
+    )
+    assert response.status_code == 500
+    detail = response.json()["detail"]
+    assert "could not save the configuration" in detail
+    assert "Read-only file system" in detail
+    assert "read-only" in detail.lower()

@@ -3,7 +3,10 @@ name: firemex
 services:
   firemex:
     build: .
-    image: ghcr.io/ismr-labs/firemex:latest
+    # A local tag, so `up` builds from this checkout instead of trying to pull an
+    # image that only exists once CI has published one. To run a published build
+    # instead, replace this with ghcr.io/ismr-labs/firemex:<tag>.
+    image: firemex:local
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -13,7 +16,10 @@ services:
       FIREMEX_REDIS_URL: redis://redis:6379/0
       FIREMEX_METRICS_TOKEN: ${FIREMEX_METRICS_TOKEN:-}
     volumes:
-      - ./config.yaml:/config/config.yaml:ro
+      # NOT read-only: the dashboard writes cameras, contacts and settings back to
+      # this file, which stays the single source of truth. Mounting it :ro makes
+      # every configuration change in the UI fail.
+      - ./config.yaml:/config/config.yaml
       - ./weights:/weights:ro
       - firemex-data:/data
     depends_on:
