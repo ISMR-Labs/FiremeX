@@ -74,7 +74,8 @@ services:
     restart: unless-stopped
     profiles: ["webrtc"]
     environment:
-      MTX_PROTOCOLS: tcp
+      # Renamed in MediaMTX v1.x; the old MTX_PROTOCOLS still works but warns.
+      MTX_RTSPTRANSPORTS: tcp
     ports:
       - "8554:8554"   # RTSP
       - "8889:8889"   # WebRTC

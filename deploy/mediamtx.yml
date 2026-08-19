@@ -1,29 +1,49 @@
-# MediaMTX config for the dashboard's live view.
+# MediaMTX config for FiremeX.
 #
-# Add one path per camera. MediaMTX pulls the RTSP stream on demand and republishes
-# it as WebRTC (low latency, best for a live wall) and HLS (works everywhere).
-# FiremeX itself talks to the cameras directly -- this gateway exists only so a
-# browser can display them.
+# Two jobs, both optional:
+#
+#   1. An RTSP *server*, so a source that is not a network camera -- a laptop
+#      webcam, a USB capture card, a video file -- can be published as an RTSP
+#      stream that FiremeX can consume like any other camera.
+#   2. An RTSP -> WebRTC/HLS gateway, so a browser can display camera feeds at
+#      full frame rate. The FiremeX dashboard does not need this: it serves tiles
+#      as MJPEG from the ring buffer. Use it when MJPEG stops scaling.
+#
+# Keys are validated strictly and the names have changed across releases: on
+# v1.20 it is `rtspTransports` (plural), not `rtspTransport`, and an unknown key
+# makes the container crash-loop rather than warn.
 
 logLevel: info
 readTimeout: 10s
 writeTimeout: 10s
 
-# Pull streams only while somebody is watching, so idle tabs cost no bandwidth.
-rtspTransport: tcp
+# TCP only. UDP loses packets under load and yields corrupt frames, which to a
+# detector look like smoke.
+rtspTransports: [tcp]
 
-webrtc: yes
-webrtcAddress: :8889
 hls: yes
 hlsAddress: :8888
 hlsVariant: lowLatency
 
-paths:
-  # Example. Match the path name to the camera id in config.yaml so the dashboard
-  # can find it, and prefer the substream: the live view does not need 4K.
-  #
-  # front-door:
-  #   source: rtsp://user:password@192.168.1.40:554/Streaming/Channels/102
-  #   sourceOnDemand: yes
+webrtc: yes
+webrtcAddress: :8889
 
+paths:
+  # Publish a local camera into this path from the host, e.g. a Mac webcam:
+  #
+  #   ffmpeg -f avfoundation -framerate 30 -i "0" \
+  #          -vcodec libx264 -preset ultrafast -tune zerolatency \
+  #          -pix_fmt yuv420p -f rtsp rtsp://localhost:8554/webcam
+  #
+  # FiremeX then reaches it at rtsp://mediamtx:8554/webcam from inside the
+  # compose network, or rtsp://localhost:8554/webcam from the host.
+  #
+  # To have MediaMTX pull an existing camera instead, name a source and prefer
+  # the substream -- the live view does not need 4K:
+  #
+  #   front-door:
+  #     source: rtsp://user:password@192.168.1.40:554/Streaming/Channels/102
+  #     sourceOnDemand: yes
+
+  # Accept publishing and reading on any other path.
   all_others:

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Publish a local camera as an RTSP stream FiremeX can consume.
+#
+# A laptop webcam is an AVFoundation (macOS) or V4L2 (Linux) device, not a network
+# camera, so it has no RTSP URL of its own. This encodes it to H.264 and publishes
+# it to the MediaMTX server in the compose stack, which gives it one.
+#
+# Start MediaMTX first:  docker compose --profile webrtc up -d mediamtx
+#
+# Usage: scripts/publish-webcam [path] [device] [size] [fps]
+#   scripts/publish-webcam                    # -> rtsp://localhost:8554/webcam
+#   scripts/publish-webcam desk 1 1920x1080   # a second camera at 1080p
+
+set -euo pipefail
+
+PATH_NAME="${1:-webcam}"
+DEVICE="${2:-0}"
+SIZE="${3:-1280x720}"
+FPS="${4:-30}"
+SERVER="${RTSP_SERVER:-rtsp://localhost:8554}"
+URL="$SERVER/$PATH_NAME"
+
+command -v ffmpeg >/dev/null 2>&1 || { echo "ffmpeg not found (brew install ffmpeg)" >&2; exit 1; }
+
+case "$(uname -s)" in
+  Darwin) INPUT=(-f avfoundation -framerate "$FPS" -video_size "$SIZE" -i "$DEVICE") ;;
+  Linux)  INPUT=(-f v4l2 -framerate "$FPS" -video_size "$SIZE" -i "/dev/video$DEVICE") ;;
+  *)      echo "unsupported platform $(uname -s)" >&2; exit 1 ;;
+esac
+
+echo "Publishing device $DEVICE ($SIZE @ ${FPS}fps) to $URL"
+echo "In FiremeX use rtsp://mediamtx:8554/$PATH_NAME  (the app runs in Docker)"
+echo "Ctrl-C to stop."
+echo
+
+# ultrafast/zerolatency because this is a live monitoring feed, not an archive:
+# latency matters far more than bitrate. slice-max-size keeps encoded slices under
+# the RTP MTU so MediaMTX does not have to remux oversized packets. A keyframe
+# every second bounds how long a reconnecting reader waits for a decodable frame.
+exec ffmpeg -hide_banner -loglevel warning \
+  "${INPUT[@]}" \
+  -vcodec libx264 -preset ultrafast -tune zerolatency \
+  -x264-params "slice-max-size=1200:keyint=$FPS" \
+  -pix_fmt yuv420p -g "$FPS" \
+  -f rtsp -rtsp_transport tcp "$URL"
