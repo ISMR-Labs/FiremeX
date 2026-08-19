@@ -84,7 +84,10 @@ case "$ACTION" in
     ;;
   down)
     ensure_daemon
-    compose down
+    # Every profile, not just the default set: `docker compose down` ignores
+    # services behind a profile, so MediaMTX and the Prometheus pair would be left
+    # running and "down" would not mean down.
+    COMPOSE_PROFILES=webrtc,observability compose --profile webrtc --profile observability down
     echo "Stopped. Incidents, users and evidence are kept in the Docker volumes."
     ;;
   restart)
