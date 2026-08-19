@@ -82,14 +82,50 @@ firemex serve --live            # alerting enabled
 
 ### Docker
 
+The image installs the `video` and `onnx` extras — no torch — so export your weights
+to ONNX first:
+
 ```bash
-cp .env.example .env && $EDITOR .env
-cp config.example.yaml config.yaml && $EDITOR config.yaml
+firemex download-weights
+yolo export model=weights/firemex-yolov26s.pt format=onnx imgsz=640 dynamic=True
+
+cp .env.example .env && $EDITOR .env          # set FIREMEX_MODEL_PATH=/weights/<name>.onnx
+cp config.example.yaml config.yaml            # cameras are added from the dashboard
 docker compose up -d
-docker compose --profile observability up -d   # + Prometheus and Grafana
+docker compose --profile observability up -d  # + Prometheus and Grafana
+docker compose --profile webrtc up -d         # + MediaMTX RTSP gateway
 ```
 
-If your cameras are on a separate VLAN, switch the `firemex` service to `network_mode: host`.
+Then open http://localhost:8000 and sign in as `admin` / `admin`.
+
+Notes from actually deploying this:
+
+- **`config.yaml` must be mounted writable.** The dashboard writes cameras, contacts
+  and settings back to it. Mounting it `:ro` makes every configuration change fail.
+- Cameras usually live on a LAN the container must reach. If your NVR is on a
+  separate VLAN, switch the `firemex` service to `network_mode: host`.
+- If `DOCKER_DEFAULT_PLATFORM` is set in your shell (common on Apple Silicon), the
+  build pulls a base image for the wrong architecture and fails with
+  `exec format error`. Pass `--platform linux/arm64` explicitly, or unset it.
+- The compose file builds from the checkout and tags `firemex:local`. To run a
+  published image instead, point `image:` at `ghcr.io/ismr-labs/firemex:<tag>`.
+- MediaMTX and the Prometheus/Grafana pair are opt-in profiles, so a plain
+  `up -d` does not need their images.
+
+On macOS, `scripts/firemex-local` wraps all of this — it picks the right platform
+for your architecture, works around a `credsStore` helper that Colima does not
+ship, and restarts Colima when its Docker socket dies after the host sleeps (the
+VM and containers stay fine; only the host-side forward breaks).
+
+```bash
+scripts/firemex-local up        # start, creating config.yaml if missing
+scripts/firemex-local status    # container health plus /api/health and /api/ready
+scripts/firemex-local doctor    # diagnose the daemon, platform and autostart
+scripts/firemex-local logs      # follow the app log
+```
+
+`restart: unless-stopped` only helps once the Docker daemon is back, so on a Mac
+also make the runtime itself start at login: `brew services start colima`.
 
 ---
 
