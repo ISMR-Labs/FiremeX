@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+#
+# Start, stop and check a local FiremeX stack.
+#
+# Exists because "run it locally" on macOS has three sharp edges that have nothing
+# to do with FiremeX itself, and hitting them looks like the app is broken:
+#
+#   1. Colima's Docker socket forward dies when the host sleeps. The VM and the
+#      containers are fine; the daemon is simply unreachable from the host. The
+#      fix is `colima restart`, which this script does automatically.
+#   2. DOCKER_DEFAULT_PLATFORM is often pinned to linux/amd64, which makes Docker
+#      pull the wrong architecture on Apple Silicon and fail with "exec format
+#      error". This script overrides it for its own commands only.
+#   3. A `credsStore` naming a helper that is not installed (Docker Desktop ships
+#      it, Colima does not) makes every image pull fail. This script uses a
+#      throwaway Docker config without it, leaving ~/.docker untouched.
+#
+# Usage: scripts/firemex-local [up|down|restart|status|logs|doctor]
+
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ACTION="${1:-up}"
+
+# --- arch: match the host, ignoring any pinned default -----------------------
+case "$(uname -m)" in
+  arm64|aarch64) PLATFORM=linux/arm64 ;;
+  *)             PLATFORM=linux/amd64 ;;
+esac
+export DOCKER_DEFAULT_PLATFORM="$PLATFORM"
+
+# --- a Docker config without a broken credential helper ----------------------
+CFG_DIR="${TMPDIR:-/tmp}/firemex-docker-config"
+if [ -d "$HOME/.docker" ]; then
+  mkdir -p "$CFG_DIR"
+  # Copy so the daemon context is still found, then strip the helper.
+  cp -R "$HOME/.docker/." "$CFG_DIR/" 2>/dev/null || true
+  python3 - "$CFG_DIR/config.json" <<'PY' 2>/dev/null || true
+import json, sys, pathlib
+path = pathlib.Path(sys.argv[1])
+cfg = json.loads(path.read_text()) if path.exists() else {}
+if cfg.pop("credsStore", None) or cfg.pop("auths", None):
+    path.write_text(json.dumps(cfg, indent=2))
+PY
+  export DOCKER_CONFIG="$CFG_DIR"
+fi
+
+compose() { docker-compose "$@" 2>/dev/null || docker compose "$@"; }
+
+# --- make sure the daemon is actually reachable ------------------------------
+ensure_daemon() {
+  if docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v colima >/dev/null 2>&1; then
+    echo "Docker daemon unreachable and colima is not installed. Start Docker, then retry." >&2
+    return 1
+  fi
+  if colima status >/dev/null 2>&1; then
+    # The usual case after the host sleeps: VM up, socket forward dead.
+    echo "Docker socket is unreachable but Colima is running -- restarting Colima..."
+    colima restart >/dev/null 2>&1 || true
+  else
+    echo "Colima is not running -- starting it..."
+    colima start >/dev/null 2>&1 || true
+  fi
+  for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && { echo "Docker daemon is back."; return 0; }
+    sleep 2
+  done
+  echo "Could not reach the Docker daemon. Try: colima restart" >&2
+  return 1
+}
+
+case "$ACTION" in
+  up)
+    ensure_daemon
+    [ -f .env ] || { echo "No .env found. Copy .env.example and fill it in." >&2; exit 1; }
+    [ -f config.yaml ] || cp config.example.yaml config.yaml
+    compose up -d
+    echo
+    echo "FiremeX is starting at http://localhost:8000"
+    echo "First run signs in with admin / admin, then forces a password change."
+    ;;
+  down)
+    ensure_daemon
+    compose down
+    echo "Stopped. Incidents, users and evidence are kept in the Docker volumes."
+    ;;
+  restart)
+    ensure_daemon
+    compose restart
+    ;;
+  status)
+    ensure_daemon
+    compose ps
+    echo
+    printf 'health  : %s\n' "$(curl -fsS -m 5 http://localhost:8000/api/health 2>/dev/null || echo unreachable)"
+    printf 'ready   : %s\n' "$(curl -sS -m 5 http://localhost:8000/api/ready 2>/dev/null || echo unreachable)"
+    ;;
+  logs)
+    ensure_daemon
+    compose logs -f firemex
+    ;;
+  doctor)
+    echo "platform        : $PLATFORM (host $(uname -m))"
+    echo "DOCKER_CONFIG   : ${DOCKER_CONFIG:-<default>}"
+    printf 'colima          : '; colima status >/dev/null 2>&1 && echo running || echo "not running"
+    printf 'docker daemon   : '; docker info --format '{{.ServerVersion}}' 2>/dev/null || echo unreachable
+    printf 'colima autostart: '
+    if brew services list 2>/dev/null | grep -q '^colima *started'; then
+      echo "enabled"
+    else
+      echo "NOT enabled -- run: brew services start colima"
+    fi
+    printf 'app             : %s\n' "$(curl -fsS -m 5 http://localhost:8000/api/health 2>/dev/null || echo unreachable)"
+    ;;
+  *)
+    echo "Usage: scripts/firemex-local [up|down|restart|status|logs|doctor]" >&2
+    exit 2
+    ;;
+esac

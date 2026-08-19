@@ -62,11 +62,17 @@ services:
       retries: 5
     networks: [firemex]
 
-  # RTSP -> WebRTC/HLS gateway. Browsers cannot play RTSP natively, so the live
-  # view in the dashboard goes through here rather than being reimplemented.
+  # Optional RTSP -> WebRTC/HLS gateway.
+  #
+  # Behind a profile because the dashboard does not need it: camera tiles are
+  # served as MJPEG straight from the ring buffer. Leaving it in the default set
+  # meant a plain `docker compose up -d` failed for everyone who had not pulled
+  # this image, which is the opposite of optional. Start it with
+  # `docker compose --profile webrtc up -d` when you want a full-frame-rate wall.
   mediamtx:
     image: bluenviron/mediamtx:latest
     restart: unless-stopped
+    profiles: ["webrtc"]
     environment:
       MTX_PROTOCOLS: tcp
     ports:
